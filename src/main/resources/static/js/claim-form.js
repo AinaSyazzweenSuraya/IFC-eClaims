@@ -21,13 +21,50 @@ const pendingAttachments = [];
 // ROW MANAGEMENT
 // ================================================================
 
-function addRow(sectionId) {
+/*function addRow(sectionId) {
     const tbody = document.querySelector(`#${sectionId} tbody`);
     const rowNum = tbody.querySelectorAll('tr').length + 1;
     const row    = document.createElement('tr');
     row.dataset.rowNum = rowNum;
     row.innerHTML      = buildRowHtml(sectionId, rowNum);
     tbody.appendChild(row);
+    updateTotals();
+}*/
+
+function addRow(sectionId) {
+    const tbody = document.querySelector(`#${sectionId} tbody`);
+    const rowNum = tbody.querySelectorAll('tr').length + 1;
+
+    const row = document.createElement('tr');
+    row.dataset.rowNum = rowNum;
+    row.innerHTML = buildRowHtml(sectionId, rowNum);
+
+    tbody.appendChild(row);
+
+    // Auto-populate date for Others section
+    if (sectionId === 'othersSection') {
+        const dateInput = row.querySelector('.row-date');
+
+        if (dateInput) {
+            const rows = tbody.querySelectorAll('tr');
+
+            // First row -> today's date
+            if (rows.length === 1) {
+                const today = new Date();
+                dateInput.value = today.toISOString().split('T')[0];
+            } else {
+                // Get previous row's date
+                const prevDateInput = rows[rows.length - 2].querySelector('.row-date');
+
+                if (prevDateInput && prevDateInput.value) {
+                    const nextDate = new Date(prevDateInput.value);
+                    nextDate.setDate(nextDate.getDate() + 1);
+                    dateInput.value = nextDate.toISOString().split('T')[0];
+                }
+            }
+        }
+    }
+
     updateTotals();
 }
 
@@ -113,7 +150,7 @@ function buildClaimTypeOptions(sectionId) {
     const groups = {
         medicalSection: ['CL05','CL06','CL07','CL13','CL14'],
         mealSection:    ['CL01','CL02'],
-        othersSection:  ['CL03','CL04','CL08','CL09','CL10','CL11']
+        othersSection:  ['CL03','CL04','CL08','CL09','CL10','CL11', 'CL15']
     };
     const allowed = groups[sectionId] || [];
     const opts = allowed.map(id => {
@@ -147,9 +184,13 @@ function buildPmOptions() {
 }
 
 function buildAttachCell() {
-    return `<div style="position:relative">
+    return `<div style="position:relative;display:flex;align-items:center;gap:4px">
         <button type="button" class="btn-attach" title="Attach receipt" onclick="triggerAttach(this)">
             <i class="bi bi-paperclip"></i>
+        </button>
+        <button type="button" class="btn-view-attach" title="View attachment"
+                style="display:none" onclick="viewRowAttachment(this)">
+            <i class="bi bi-eye"></i>
         </button>
         <input type="file" class="row-file-input" style="display:none"
                accept=".jpg,.jpeg,.png,.pdf,.doc,.docx"
@@ -157,6 +198,21 @@ function buildAttachCell() {
         <input type="hidden" class="row-attach-path" value=""/>
         <input type="hidden" class="row-attach-name" value=""/>
     </div>`;
+}
+
+function setAttachButtonState(tr, hasFile, fileName) {
+    const btn     = tr.querySelector('.btn-attach');
+    const viewBtn = tr.querySelector('.btn-view-attach');
+    if (!btn) return;
+    if (hasFile) {
+        btn.classList.add('has-file');
+        btn.title = fileName || 'Attachment';
+        if (viewBtn) viewBtn.style.display = 'inline-flex';
+    } else {
+        btn.classList.remove('has-file');
+        btn.title = 'Attach receipt';
+        if (viewBtn) viewBtn.style.display = 'none';
+    }
 }
 
 // ================================================================
@@ -238,15 +294,37 @@ function syncMedicalTotal(input) {
 }
 
 function syncOthersTotal(input) {
-    const tr      = input.closest('tr');
-    const claimId = tr.querySelector('.row-claim-id')?.value;
-    if (claimId === 'CL04') return;
+
+    const tr = input.closest('tr');
     const total = tr.querySelector('.row-total');
-    if (total) total.value = parseFloat(input.value || 0).toFixed(2);
+
+    let raw = input.value;
+
+    if (!raw) {
+        input.value = '';
+        if (total) total.value = '';
+        updateTotals();
+        return;
+    }
+
+    // Remove non digits
+    raw = raw.replace(/[^\d]/g, '');
+
+    // Convert cents to RM
+    const formatted = (parseInt(raw, 10) / 100).toFixed(2);
+
+    // Update Amount
+    input.value = formatted;
+
+    // Update Total
+    if (total) {
+        total.value = formatted;
+    }
+
     updateTotals();
 }
 
-function calcMealRow(input) {
+/*function calcMealRow(input) {
     const tr   = input.closest('tr');
     const from = tr.querySelector('.row-time-from')?.value;
     const to   = tr.querySelector('.row-time-to')?.value;
@@ -261,9 +339,51 @@ function calcMealRow(input) {
             if (totalInput) totalInput.value  = data.total;
             updateTotals();
         }).catch(() => {});
+}*/
+
+function calcMealRow(input) {
+    const tr = input.closest('tr');
+    const from = tr.querySelector('.row-time-from')?.value;
+    const to = tr.querySelector('.row-time-to')?.value;
+    const claimId = tr.querySelector('.row-claim-id')?.value;
+
+    if (!from || !to || !claimId) return;
+
+    fetch(`/claims/api/calc/meal?claimId=${claimId}&timeFrom=${from}&timeTo=${to}`)
+        .then(r => r.json())
+        .then(data => {
+
+            alert("API Returned Total : " + data.total);
+
+            const amtInput = tr.querySelector('.row-amount');
+            const totalInput = tr.querySelector('.row-total');
+
+            // Amount (RM)
+            if (amtInput) {
+                const formattedAmount = parseFloat(data.total).toFixed(2);
+
+                alert("Formatted Amount : " + formattedAmount);
+
+                amtInput.value = formattedAmount;
+            }
+
+            // Total (RM) - same value, only display formatting
+            if (totalInput) {
+                const formattedTotal = parseFloat(data.total).toFixed(2);
+
+                alert("Formatted Total : " + formattedTotal);
+
+                totalInput.value = formattedTotal;
+            }
+
+            updateTotals();
+        })
+        .catch(err => {
+            alert("API Error : " + err);
+        });
 }
 
-function calcMileageRow(input) {
+/*function calcMileageRow(input) {
     const tr      = input.closest('tr');
     const vehicle = tr.querySelector('.row-vehicle')?.value;
     const km      = parseInt(tr.querySelector('.row-km')?.value) || 0;
@@ -277,9 +397,38 @@ function calcMileageRow(input) {
             if (totalInput) totalInput.value = data.total;
             updateTotals();
         }).catch(() => {});
+}*/
+
+function calcMileageRow(input) {
+    const tr = input.closest('tr');
+    const vehicle = tr.querySelector('.row-vehicle')?.value;
+    const km = parseInt(tr.querySelector('.row-km')?.value) || 0;
+
+    if (!vehicle || !km) return;
+
+    fetch(`/claims/api/calc/mileage?vehicleType=${vehicle}&km=${km}`)
+        .then(r => r.json())
+        .then(data => {
+
+            const amtInput = tr.querySelector('.row-amount');
+            const totalInput = tr.querySelector('.row-total');
+
+            if (amtInput) {
+                const formattedAmount = parseFloat(data.total).toFixed(2);
+                amtInput.value = formattedAmount;
+            }
+
+            if (totalInput) {
+                const formattedTotal = parseFloat(data.total).toFixed(2);
+                totalInput.value = formattedTotal;
+            }
+
+            updateTotals();
+        })
+        .catch(() => {});
 }
 
-function calcTravelRow(select) {
+/*function calcTravelRow(select) {
     const tr      = select.closest('tr');
     const travelId = tr.querySelector('.row-travel-id')?.value;
     const mealId   = tr.querySelector('.row-meal-id')?.value;
@@ -293,6 +442,48 @@ function calcTravelRow(select) {
             if (totalInput) totalInput.value = data.total;
             updateTotals();
         }).catch(() => {});
+}*/
+
+function calcTravelRow(select) {
+    const tr = select.closest('tr');
+    const travelId = tr.querySelector('.row-travel-id')?.value;
+    const mealId = tr.querySelector('.row-meal-id')?.value;
+
+    if (!travelId || !mealId) return;
+
+    fetch(`/claims/api/calc/travel?travelId=${travelId}&mealId=${mealId}`)
+        .then(r => r.json())
+        .then(data => {
+
+            alert("API Claim Limit : " + data.claimLimit);
+            alert("API Total : " + data.total);
+
+            const amtInput = tr.querySelector('.row-amount');
+            const totalInput = tr.querySelector('.row-total');
+
+            // Amount (RM)
+            if (amtInput) {
+                const formattedAmount = parseFloat(data.claimLimit).toFixed(2);
+
+                alert("Formatted Amount : " + formattedAmount);
+
+                amtInput.value = formattedAmount;
+            }
+
+            // Total (RM)
+            if (totalInput) {
+                const formattedTotal = parseFloat(data.total).toFixed(2);
+
+                alert("Formatted Total : " + formattedTotal);
+
+                totalInput.value = formattedTotal;
+            }
+
+            updateTotals();
+        })
+        .catch(err => {
+            alert("API Error : " + err);
+        });
 }
 
 function updateTotals() {
@@ -338,8 +529,8 @@ async function handleRowAttach(input) {
         if (idx >= 0) pendingAttachments.splice(idx, 1);
         pendingAttachments.push({ tr, file });
 
-        btn.classList.add('has-file');
-        btn.title = file.name;
+       
+        setAttachButtonState(tr, true, file.name);
         if (nameInput) nameInput.value = file.name;
         showToast(`${file.name} will upload on Save Draft`, 'success');
     }
@@ -355,7 +546,7 @@ async function uploadFileToRow(rowId, file, btn) {
         });
         const data = await res.json();
         if (data.success) {
-            if (btn) { btn.classList.add('has-file'); btn.title = file.name; }
+            if (btn) setAttachButtonState(btn.closest('tr'), true, file.name);
             showToast(`Attached: ${file.name}`, 'success');
             return true;
         } else {
@@ -377,6 +568,23 @@ async function uploadPendingAttachments() {
             const btn = tr.querySelector('.btn-attach');
             const ok  = await uploadFileToRow(rowId, file, btn);
             if (ok) pendingAttachments.splice(i, 1);
+        }
+    }
+}
+
+function viewRowAttachment(btn) {
+    const tr    = btn.closest('tr');
+    const rowId = tr.dataset.rowId;
+    if (rowId) {
+        window.open(`/claims/row/${rowId}/attachment/view`, '_blank');
+    } else {
+        // Row not yet saved — open local file preview if still in pendingAttachments
+        const pending = pendingAttachments.find(p => p.tr === tr);
+        if (pending) {
+            const url = URL.createObjectURL(pending.file);
+            window.open(url, '_blank');
+        } else {
+            showToast('Save the draft first to view this attachment', 'error');
         }
     }
 }
@@ -427,10 +635,19 @@ function collectRows() {
 // ================================================================
 
 async function saveDraft() {
-    const rows = collectRows();
-    if (rows.length === 0) { showToast('Add at least one claim row', 'error'); return; }
+const rows = collectRows();
+
+    if (rows.length === 0) { 
+        showToast('Add at least one claim row', 'error'); 
+        return; 
+    }
+
+    if (!validateRows()) {
+        return;
+    }
+
     try {
-        const res  = await fetch('/claims/save-draft', {
+        const res = await fetch('/claims/save-draft', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...csrfHeader() },
             body: JSON.stringify({ rows, workflowId: currentWorkflowId })
@@ -457,6 +674,105 @@ async function saveDraft() {
     } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
 }
 
+function validateRows() {
+
+    const sections = [
+        'medicalSection',
+        'mealSection',
+        'travelSection',
+        'othersSection'
+    ];
+
+    for (const sectionId of sections) {
+
+        const rows = document.querySelectorAll(`#${sectionId} tbody tr`);
+
+        for (let i = 0; i < rows.length; i++) {
+
+            const tr = rows[i];
+
+            const claimId =
+                tr.querySelector('.row-claim-id')?.value;
+
+
+            const amount =
+                tr.querySelector('.row-amount')?.value;
+
+
+            // Check empty amount
+            if (!amount) {
+                showToast(
+                    `Please enter Amount in ${sectionId} row ${i + 1}`,
+                    'error'
+                );
+                return false;
+            }
+
+
+            // Meal validation
+            if (sectionId === 'mealSection') {
+
+                const from =
+                    tr.querySelector('.row-time-from')?.value;
+
+                const to =
+                    tr.querySelector('.row-time-to')?.value;
+
+
+                if (!from || !to) {
+                    showToast(
+                        `Please enter time in Meal row ${i + 1}`,
+                        'error'
+                    );
+                    return false;
+                }
+            }
+
+
+            // Travel validation
+            if (sectionId === 'travelSection') {
+
+                const travel =
+                    tr.querySelector('.row-travel-id')?.value;
+
+                const meal =
+                    tr.querySelector('.row-meal-id')?.value;
+
+
+                if (!travel || !meal) {
+                    showToast(
+                        `Please select Travel details in row ${i + 1}`,
+                        'error'
+                    );
+                    return false;
+                }
+            }
+
+
+            // Mileage validation
+            if (sectionId === 'othersSection'
+                && claimId === 'CL04') {
+
+                const vehicle =
+                    tr.querySelector('.row-vehicle')?.value;
+
+                const km =
+                    tr.querySelector('.row-km')?.value;
+
+
+                if (!vehicle || !km) {
+                    showToast(
+                        `Please complete Mileage details in row ${i + 1}`,
+                        'error'
+                    );
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
 // ================================================================
 // REFRESH ROW IDS
 // ================================================================
@@ -594,7 +910,7 @@ function loadExistingRows() {
             }
         }
 
-        if (sectionId === 'mealSection') {
+        /*if (sectionId === 'mealSection') {
             setVal(tr, '.row-time-from', row.timeFrom || '');
             setVal(tr, '.row-time-to',   row.timeTo   || '');
             setVal(tr, '.row-pm',        row.projectManagerId || '');
@@ -603,41 +919,100 @@ function loadExistingRows() {
             if (amtEl && totEl && amtEl.value && !totEl.value) {
                 totEl.value = parseFloat(amtEl.value).toFixed(2);
             }
+        }*/
+        
+		if (sectionId === 'mealSection') {
+
+			setVal(tr, '.row-time-from', row.timeFrom || '');
+			setVal(tr, '.row-time-to', row.timeTo || '');
+			setVal(tr, '.row-pm', row.projectManagerId || '');
+
+			const amtEl = tr.querySelector('.row-amount');
+			const totEl = tr.querySelector('.row-total');
+
+			if (amtEl && row.amount != null) {
+				amtEl.value = parseFloat(row.amount).toFixed(2);
+			}
+
+			if (totEl) {
+				const totalValue = row.total != null ? row.total : row.amount;
+
+				if (totalValue != null) {
+					totEl.value = parseFloat(totalValue).toFixed(2);
+				}
+			}
+		}
+
+		if (sectionId === 'travelSection') {
+
+			setVal(tr, '.row-travel-id', row.travelId || '');
+			setVal(tr, '.row-meal-id', row.mealId || '');
+
+			const amtEl = tr.querySelector('.row-amount');
+			const totEl = tr.querySelector('.row-total');
+
+			// Format Amount (RM)
+			if (amtEl && row.amount != null) {
+				amtEl.value = parseFloat(row.amount).toFixed(2);
+			}
+
+			// Format Total (RM)
+			if (totEl) {
+				const totalValue = row.total != null ? row.total : row.amount;
+
+				if (totalValue != null) {
+					totEl.value = parseFloat(totalValue).toFixed(2);
+				}
+			}
+		}
+
+       if (sectionId === 'othersSection') {
+
+    if (id === 'CL04' && row.mileageVehicleType) {
+
+        setVal(tr, '.row-vehicle', row.mileageVehicleType);
+        setVal(tr, '.row-km', row.mileageKm || '');
+
+        const vehicleSel = tr.querySelector('.row-vehicle');
+
+        if (vehicleSel) {
+            calcMileageRow(vehicleSel);
         }
 
-        if (sectionId === 'travelSection') {
-            setVal(tr, '.row-travel-id', row.travelId || '');
-            setVal(tr, '.row-meal-id',   row.mealId   || '');
+    } else {
+
+        setVal(tr, '.row-km', row.mileageKm || '');
+
+        const amtEl = tr.querySelector('.row-amount');
+        const totEl = tr.querySelector('.row-total');
+
+
+        if (amtEl && row.amount != null) {
+            amtEl.value = parseFloat(row.amount).toFixed(2);
         }
 
-        if (sectionId === 'othersSection') {
-            if (id === 'CL04' && row.mileageVehicleType) {
-                setVal(tr, '.row-vehicle', row.mileageVehicleType);
-                setVal(tr, '.row-km',      row.mileageKm || '');
-                const vehicleSel = tr.querySelector('.row-vehicle');
-                if (vehicleSel) calcMileageRow(vehicleSel);
-            } else {
-                setVal(tr, '.row-km', row.mileageKm || '');
-                const amtEl = tr.querySelector('.row-amount');
-                const totEl = tr.querySelector('.row-total');
-                if (amtEl && totEl && amtEl.value) {
-                    totEl.value = parseFloat(amtEl.value).toFixed(2);
-                }
+
+        if (totEl) {
+
+            const totalValue =
+                row.total != null ? row.total : row.amount;
+
+            if (totalValue != null) {
+                totEl.value =
+                    parseFloat(totalValue).toFixed(2);
             }
         }
+    }
+}
 
-        const hasAttach = row.attachmentPath || row.attachmentOriginalName || row.hasAttachment;
-        if (hasAttach) {
-            const btn = tr.querySelector('.btn-attach');
-            if (btn) {
-                btn.classList.add('has-file');
-                btn.title = row.attachmentOriginalName || 'Attachment';
-            }
-            const pathInput = tr.querySelector('.row-attach-path');
-            const nameInput = tr.querySelector('.row-attach-name');
-            if (pathInput) pathInput.value = row.attachmentPath || '';
-            if (nameInput) nameInput.value  = row.attachmentOriginalName || '';
-        }
+       const hasAttach = row.attachmentPath || row.attachmentOriginalName || row.hasAttachment;
+		if (hasAttach) {
+		    setAttachButtonState(tr, true, row.attachmentOriginalName || 'Attachment');
+		    const pathInput = tr.querySelector('.row-attach-path');
+		    const nameInput = tr.querySelector('.row-attach-name');
+		    if (pathInput) pathInput.value = row.attachmentPath || '';
+		    if (nameInput) nameInput.value  = row.attachmentOriginalName || '';
+		}
     });
 
     updateTotals();

@@ -97,6 +97,20 @@ public class AttachmentService {
     public List<ClaimAttachment> getFormAttachments(String workflowId) {
         return attachmentRepository.findByWorkflowIdOrderByDocDate(workflowId);
     }
+    
+    public Path getRowFilePath(Integer rowId) {
+        ClaimFormRow row = rowRepository.findById(rowId)
+            .orElseThrow(() -> new IllegalArgumentException("Row not found: " + rowId));
+        if (row.getAttachmentPath() == null)
+            throw new IllegalArgumentException("No attachment for row: " + rowId);
+        return getFilePath(row.getAttachmentPath());
+    }
+
+    public String getRowAttachmentOriginalName(Integer rowId) {
+        ClaimFormRow row = rowRepository.findById(rowId)
+            .orElseThrow(() -> new IllegalArgumentException("Row not found: " + rowId));
+        return row.getAttachmentOriginalName();
+    }
 
     // ── Internal helpers ──────────────────────────────────────
     private String saveFile(MultipartFile file, String workflowId) throws IOException {
@@ -129,4 +143,6 @@ public class AttachmentService {
         int idx = filename.lastIndexOf('.');
         return idx >= 0 ? filename.substring(idx) : "";
     }
+    
+    
 }

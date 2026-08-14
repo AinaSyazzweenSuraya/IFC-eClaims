@@ -183,7 +183,40 @@ public class ClaimController {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
         }
     }
+    
+    @GetMapping("/row/{rowId}/attachment/view")
+    public ResponseEntity<org.springframework.core.io.Resource> viewRowAttachment(
+            @PathVariable Integer rowId,
+            @AuthenticationPrincipal UserDetails user) {
+        try {
+            com.eclaims.entity.ClaimFormRow row = claimFormRowRepository.findById(rowId)
+                .orElseThrow(() -> new IllegalArgumentException("Row not found"));
 
+            ClaimFormDto form = claimService.loadForm(row.getWorkflowId());
+            if (!canAccess(form.getStaffId(), user))
+                return ResponseEntity.status(403).build();
+
+            java.nio.file.Path filePath = attachmentService.getRowFilePath(rowId);
+            if (!java.nio.file.Files.exists(filePath))
+                return ResponseEntity.notFound().build();
+
+            org.springframework.core.io.Resource resource =
+                new org.springframework.core.io.FileSystemResource(filePath);
+
+            String originalName = attachmentService.getRowAttachmentOriginalName(rowId);
+            String contentType  = java.nio.file.Files.probeContentType(filePath);
+            if (contentType == null) contentType = "application/octet-stream";
+
+            return ResponseEntity.ok()
+                .header("Content-Disposition", "inline; filename=\"" + originalName + "\"")
+                .contentType(org.springframework.http.MediaType.parseMediaType(contentType))
+                .body(resource);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().build();
+        }
+    }
+
+    
     // ── Upload form-level attachment ────────────────────────────
     @PostMapping("/{workflowId}/attachment")
     @ResponseBody
