@@ -225,10 +225,22 @@ function onClaimTypeChange(select) {
     const clinicDiv   = tr.querySelector('.medical-clinic-cell');
     const mileageDiv  = tr.querySelector('.mileage-fields');
     const amountInput = tr.querySelector('.row-amount');
-    const descInput   = tr.querySelector('.others-desc');
+    const totalInput  = tr.querySelector('.row-total');
 
-    if (clinicDiv) clinicDiv.style.display = id === 'CL05' ? 'block' : 'none';
+    // Meal rows are identified by the time inputs
+    const isMealRow = !!tr.querySelector('.row-time-from');
+
+    if (clinicDiv)  clinicDiv.style.display  = id === 'CL05' ? 'block' : 'none';
     if (mileageDiv) mileageDiv.style.display = id === 'CL04' ? 'block' : 'none';
+
+    if (isMealRow) {
+        // Amount is always calculated by the API, keep it read-only
+        if (amountInput) amountInput.value = '';
+        if (totalInput)  totalInput.value  = '';
+        updateTotals();
+        calcMealRow(select);   // recalculate with the new claim type
+        return;
+    }
 
     if (amountInput) {
         if (id === 'CL04') {
@@ -241,9 +253,7 @@ function onClaimTypeChange(select) {
         }
     }
 
-    const totalInput = tr.querySelector('.row-total');
     if (totalInput) totalInput.value = '';
-
     updateTotals();
 }
 
@@ -342,45 +352,30 @@ function syncOthersTotal(input) {
 }*/
 
 function calcMealRow(input) {
-    const tr = input.closest('tr');
-    const from = tr.querySelector('.row-time-from')?.value;
-    const to = tr.querySelector('.row-time-to')?.value;
+    const tr      = input.closest('tr');
+    const from    = tr.querySelector('.row-time-from')?.value;
+    const to      = tr.querySelector('.row-time-to')?.value;
     const claimId = tr.querySelector('.row-claim-id')?.value;
+    const amtInput   = tr.querySelector('.row-amount');
+    const totalInput = tr.querySelector('.row-total');
 
-    if (!from || !to || !claimId) return;
+    // Incomplete input: clear stale values instead of keeping the old amount
+    if (!from || !to || !claimId) {
+        if (amtInput)   amtInput.value   = '';
+        if (totalInput) totalInput.value = '';
+        updateTotals();
+        return;
+    }
 
-    fetch(`/claims/api/calc/meal?claimId=${claimId}&timeFrom=${from}&timeTo=${to}`)
+    fetch(`/claims/api/calc/meal?claimId=${encodeURIComponent(claimId)}&timeFrom=${from}&timeTo=${to}`)
         .then(r => r.json())
         .then(data => {
-
-            alert("API Returned Total : " + data.total);
-
-            const amtInput = tr.querySelector('.row-amount');
-            const totalInput = tr.querySelector('.row-total');
-
-            // Amount (RM)
-            if (amtInput) {
-                const formattedAmount = parseFloat(data.total).toFixed(2);
-
-                alert("Formatted Amount : " + formattedAmount);
-
-                amtInput.value = formattedAmount;
-            }
-
-            // Total (RM) - same value, only display formatting
-            if (totalInput) {
-                const formattedTotal = parseFloat(data.total).toFixed(2);
-
-                alert("Formatted Total : " + formattedTotal);
-
-                totalInput.value = formattedTotal;
-            }
-
+            const formatted = parseFloat(data.total || 0).toFixed(2);
+            if (amtInput)   amtInput.value   = formatted;
+            if (totalInput) totalInput.value = formatted;
             updateTotals();
         })
-        .catch(err => {
-            alert("API Error : " + err);
-        });
+        .catch(() => showToast('Failed to calculate meal allowance', 'error'));
 }
 
 /*function calcMileageRow(input) {
