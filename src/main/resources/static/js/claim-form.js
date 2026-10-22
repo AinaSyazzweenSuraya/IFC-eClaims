@@ -7,7 +7,7 @@
 // DATA FROM SERVER (injected via Thymeleaf inline JS in form.html)
 // ================================================================
 // CLAIM_TYPES, PANEL_CLINICS, TRAVEL_LOCATIONS, TRAVEL_MEALS, PROJECT_MANAGERS
-// are declared in the form template as const variables.
+// and CLAIM_MONTH ("yyyy-MM") are declared in the form template as const variables.
 
 let currentWorkflowId = null;
 
@@ -18,18 +18,43 @@ let isDirty = false;
 const pendingAttachments = [];
 
 // ================================================================
-// ROW MANAGEMENT
+// CLAIM MONTH HELPERS
 // ================================================================
 
-/*function addRow(sectionId) {
-    const tbody = document.querySelector(`#${sectionId} tbody`);
-    const rowNum = tbody.querySelectorAll('tr').length + 1;
-    const row    = document.createElement('tr');
-    row.dataset.rowNum = rowNum;
-    row.innerHTML      = buildRowHtml(sectionId, rowNum);
-    tbody.appendChild(row);
-    updateTotals();
-}*/
+function pad2(n) {
+    return String(n).padStart(2, '0');
+}
+
+// Local date -> "yyyy-MM-dd" (avoids the UTC shift of toISOString)
+function toLocalISO(d) {
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+
+// First and last day of the claim month, or null when no month is set
+function monthRange() {
+    if (!CLAIM_MONTH) return null;
+    const [y, m] = CLAIM_MONTH.split('-').map(Number);
+    const last = new Date(y, m, 0).getDate();
+    return { min: `${CLAIM_MONTH}-01`, max: `${CLAIM_MONTH}-${pad2(last)}` };
+}
+
+// Stop the date pickers inside `scope` from choosing dates outside the claim month
+function applyDateLimit(scope) {
+    const r = monthRange();
+    if (!r) return;
+    scope.querySelectorAll('.row-date').forEach(d => {
+        d.min = r.min;
+        d.max = r.max;
+    });
+}
+
+function isInClaimMonth(dateStr) {
+    return !!dateStr && dateStr.startsWith(CLAIM_MONTH);
+}
+
+// ================================================================
+// ROW MANAGEMENT
+// ================================================================
 
 function addRow(sectionId) {
     const tbody = document.querySelector(`#${sectionId} tbody`);
@@ -41,6 +66,9 @@ function addRow(sectionId) {
 
     tbody.appendChild(row);
 
+    // Date picker only allows days inside the claim month
+    applyDateLimit(row);
+
     // Auto-populate date for Others section
     if (sectionId === 'othersSection') {
         const dateInput = row.querySelector('.row-date');
@@ -48,18 +76,22 @@ function addRow(sectionId) {
         if (dateInput) {
             const rows = tbody.querySelectorAll('tr');
 
-            // First row -> today's date
             if (rows.length === 1) {
-                const today = new Date();
-                dateInput.value = today.toISOString().split('T')[0];
+                // First row -> today, or the 1st of the claim month if today is outside it
+                const todayStr = toLocalISO(new Date());
+                dateInput.value = (!CLAIM_MONTH || isInClaimMonth(todayStr))
+                    ? todayStr
+                    : CLAIM_MONTH + '-01';
             } else {
-                // Get previous row's date
+                // Next row -> previous row's date + 1 day (only if still inside the month)
                 const prevDateInput = rows[rows.length - 2].querySelector('.row-date');
 
                 if (prevDateInput && prevDateInput.value) {
-                    const nextDate = new Date(prevDateInput.value);
-                    nextDate.setDate(nextDate.getDate() + 1);
-                    dateInput.value = nextDate.toISOString().split('T')[0];
+                    const [y, m, d] = prevDateInput.value.split('-').map(Number);
+                    const nextStr = toLocalISO(new Date(y, m - 1, d + 1));
+                    if (!CLAIM_MONTH || isInClaimMonth(nextStr)) {
+                        dateInput.value = nextStr;
+                    }
                 }
             }
         }
@@ -158,7 +190,7 @@ function buildClaimTypeOptions(sectionId) {
         return t ? `<option value="${t.claimId}">${t.claimTitle || t.claimId}</option>` : '';
     }).join('');
     return `<select class="row-input row-claim-id" onchange="onClaimTypeChange(this)">`
-         + `<option value="">Select type...</option>${opts}</select>`;
+        + `<option value="">Select type...</option>${opts}</select>`;
 }
 
 function buildPanelClinicOptions() {
@@ -169,13 +201,13 @@ function buildPanelClinicOptions() {
 function buildTravelLocationOptions() {
     const opts = TRAVEL_LOCATIONS.map(t => `<option value="${t.id}" data-limit="${t.limit}">${t.location}</option>`).join('');
     return `<select class="row-input row-travel-id" onchange="calcTravelRow(this)">`
-         + `<option value="">Select location...</option>${opts}</select>`;
+        + `<option value="">Select location...</option>${opts}</select>`;
 }
 
 function buildTravelMealOptions() {
     const opts = TRAVEL_MEALS.map(m => `<option value="${m.id}" data-pct="${m.pct}">${m.desc}</option>`).join('');
     return `<select class="row-input row-meal-id" onchange="calcTravelRow(this)">`
-         + `<option value="">Select meal...</option>${opts}</select>`;
+        + `<option value="">Select meal...</option>${opts}</select>`;
 }
 
 function buildPmOptions() {
@@ -524,7 +556,7 @@ async function handleRowAttach(input) {
         if (idx >= 0) pendingAttachments.splice(idx, 1);
         pendingAttachments.push({ tr, file });
 
-       
+
         setAttachButtonState(tr, true, file.name);
         if (nameInput) nameInput.value = file.name;
         showToast(`${file.name} will upload on Save Draft`, 'success');
@@ -630,14 +662,25 @@ function collectRows() {
 // ================================================================
 
 async function saveDraft() {
-const rows = collectRows();
+    const rows = collectRows();
 
-    if (rows.length === 0) { 
-        showToast('Add at least one claim row', 'error'); 
-        return; 
+    if (rows.length === 0) {
+        showToast('Add at least one claim row', 'error');
+        return;
     }
 
     if (!validateRows()) {
+        return;
+    }
+
+    // Every row must have a date inside the Claim Month chosen in the popup
+    if (!CLAIM_MONTH) {
+        showToast('Claim Month is missing. Please start again from New Claim.', 'error');
+        return;
+    }
+    const badRow = rows.find(r => !isInClaimMonth(r.date));
+    if (badRow) {
+        showToast('All row dates must be within the selected Claim Month (' + CLAIM_MONTH + ')', 'error');
         return;
     }
 
@@ -645,7 +688,7 @@ const rows = collectRows();
         const res = await fetch('/claims/save-draft', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...csrfHeader() },
-            body: JSON.stringify({ rows, workflowId: currentWorkflowId })
+            body: JSON.stringify({ rows, workflowId: currentWorkflowId, claimMonth: CLAIM_MONTH })
         });
         const data = await res.json();
         if (data.success) {
@@ -792,7 +835,7 @@ async function refreshRowIds(workflowId) {
             const domRows = Array.from(document.querySelectorAll(`#${sectionId} tbody tr`));
             domRows.forEach(tr => {
                 const claimId = tr.querySelector('.row-claim-id')?.value
-                             || (sectionId === 'travelSection' ? 'CL12' : null);
+                    || (sectionId === 'travelSection' ? 'CL12' : null);
                 if (!claimId) return;
                 if (!usageIdx[claimId]) usageIdx[claimId] = 0;
                 const rowIds = claimIdToRowIds[claimId] || [];
@@ -893,11 +936,11 @@ function loadExistingRows() {
 
         if (sectionId === 'medicalSection') {
             //setVal(tr, '.row-panel-clinic', row.medicalClinic || '');
-			setVal(
-				tr,
-				'.row-amount',
-				row.amount != null ? parseFloat(row.amount).toFixed(2) : ''
-			);
+            setVal(
+                tr,
+                '.row-amount',
+                row.amount != null ? parseFloat(row.amount).toFixed(2) : ''
+            );
             const amtEl = tr.querySelector('.row-amount');
             const totEl = tr.querySelector('.row-total');
             if (amtEl && totEl && amtEl.value && !totEl.value) {
@@ -915,99 +958,99 @@ function loadExistingRows() {
                 totEl.value = parseFloat(amtEl.value).toFixed(2);
             }
         }*/
-        
-		if (sectionId === 'mealSection') {
 
-			setVal(tr, '.row-time-from', row.timeFrom || '');
-			setVal(tr, '.row-time-to', row.timeTo || '');
-			setVal(tr, '.row-pm', row.projectManagerId || '');
+        if (sectionId === 'mealSection') {
 
-			const amtEl = tr.querySelector('.row-amount');
-			const totEl = tr.querySelector('.row-total');
+            setVal(tr, '.row-time-from', row.timeFrom || '');
+            setVal(tr, '.row-time-to', row.timeTo || '');
+            setVal(tr, '.row-pm', row.projectManagerId || '');
 
-			if (amtEl && row.amount != null) {
-				amtEl.value = parseFloat(row.amount).toFixed(2);
-			}
+            const amtEl = tr.querySelector('.row-amount');
+            const totEl = tr.querySelector('.row-total');
 
-			if (totEl) {
-				const totalValue = row.total != null ? row.total : row.amount;
+            if (amtEl && row.amount != null) {
+                amtEl.value = parseFloat(row.amount).toFixed(2);
+            }
 
-				if (totalValue != null) {
-					totEl.value = parseFloat(totalValue).toFixed(2);
-				}
-			}
-		}
+            if (totEl) {
+                const totalValue = row.total != null ? row.total : row.amount;
 
-		if (sectionId === 'travelSection') {
-
-			setVal(tr, '.row-travel-id', row.travelId || '');
-			setVal(tr, '.row-meal-id', row.mealId || '');
-
-			const amtEl = tr.querySelector('.row-amount');
-			const totEl = tr.querySelector('.row-total');
-
-			// Format Amount (RM)
-			if (amtEl && row.amount != null) {
-				amtEl.value = parseFloat(row.amount).toFixed(2);
-			}
-
-			// Format Total (RM)
-			if (totEl) {
-				const totalValue = row.total != null ? row.total : row.amount;
-
-				if (totalValue != null) {
-					totEl.value = parseFloat(totalValue).toFixed(2);
-				}
-			}
-		}
-
-       if (sectionId === 'othersSection') {
-
-    if (id === 'CL04' && row.mileageVehicleType) {
-
-        setVal(tr, '.row-vehicle', row.mileageVehicleType);
-        setVal(tr, '.row-km', row.mileageKm || '');
-
-        const vehicleSel = tr.querySelector('.row-vehicle');
-
-        if (vehicleSel) {
-            calcMileageRow(vehicleSel);
-        }
-
-    } else {
-
-        setVal(tr, '.row-km', row.mileageKm || '');
-
-        const amtEl = tr.querySelector('.row-amount');
-        const totEl = tr.querySelector('.row-total');
-
-
-        if (amtEl && row.amount != null) {
-            amtEl.value = parseFloat(row.amount).toFixed(2);
-        }
-
-
-        if (totEl) {
-
-            const totalValue =
-                row.total != null ? row.total : row.amount;
-
-            if (totalValue != null) {
-                totEl.value =
-                    parseFloat(totalValue).toFixed(2);
+                if (totalValue != null) {
+                    totEl.value = parseFloat(totalValue).toFixed(2);
+                }
             }
         }
-    }
-}
 
-       const hasAttach = row.attachmentPath || row.attachmentOriginalName || row.hasAttachment;
-		if (hasAttach) {
-		    setAttachButtonState(tr, true, row.attachmentOriginalName || 'Attachment');
-		    const pathInput = tr.querySelector('.row-attach-path');
-		    const nameInput = tr.querySelector('.row-attach-name');
-		    if (pathInput) pathInput.value = row.attachmentPath || '';
-		    if (nameInput) nameInput.value  = row.attachmentOriginalName || '';
-		}
+        if (sectionId === 'travelSection') {
+
+            setVal(tr, '.row-travel-id', row.travelId || '');
+            setVal(tr, '.row-meal-id', row.mealId || '');
+
+            const amtEl = tr.querySelector('.row-amount');
+            const totEl = tr.querySelector('.row-total');
+
+            // Format Amount (RM)
+            if (amtEl && row.amount != null) {
+                amtEl.value = parseFloat(row.amount).toFixed(2);
+            }
+
+            // Format Total (RM)
+            if (totEl) {
+                const totalValue = row.total != null ? row.total : row.amount;
+
+                if (totalValue != null) {
+                    totEl.value = parseFloat(totalValue).toFixed(2);
+                }
+            }
+        }
+
+        if (sectionId === 'othersSection') {
+
+            if (id === 'CL04' && row.mileageVehicleType) {
+
+                setVal(tr, '.row-vehicle', row.mileageVehicleType);
+                setVal(tr, '.row-km', row.mileageKm || '');
+
+                const vehicleSel = tr.querySelector('.row-vehicle');
+
+                if (vehicleSel) {
+                    calcMileageRow(vehicleSel);
+                }
+
+            } else {
+
+                setVal(tr, '.row-km', row.mileageKm || '');
+
+                const amtEl = tr.querySelector('.row-amount');
+                const totEl = tr.querySelector('.row-total');
+
+
+                if (amtEl && row.amount != null) {
+                    amtEl.value = parseFloat(row.amount).toFixed(2);
+                }
+
+
+                if (totEl) {
+
+                    const totalValue =
+                        row.total != null ? row.total : row.amount;
+
+                    if (totalValue != null) {
+                        totEl.value =
+                            parseFloat(totalValue).toFixed(2);
+                    }
+                }
+            }
+        }
+
+        const hasAttach = row.attachmentPath || row.attachmentOriginalName || row.hasAttachment;
+        if (hasAttach) {
+            setAttachButtonState(tr, true, row.attachmentOriginalName || 'Attachment');
+            const pathInput = tr.querySelector('.row-attach-path');
+            const nameInput = tr.querySelector('.row-attach-name');
+            if (pathInput) pathInput.value = row.attachmentPath || '';
+            if (nameInput) nameInput.value  = row.attachmentOriginalName || '';
+        }
     });
 
     updateTotals();

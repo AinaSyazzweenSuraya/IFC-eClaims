@@ -2,8 +2,14 @@ package com.eclaims.controller;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.format.DateTimeParseException;
+import java.time.format.TextStyle;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -62,28 +68,33 @@ public class ClaimController {
     private final TravelMealRepository      travelMealRepository;
     private final ProjectManagerRepository  pmRepository;
 
-    // ── New claim form ──────────────────────────────────────────
+    // ── New claim: /claims/new (no month) → send back to dashboard ──
+    // The month is picked in the popup, which goes to /claims/new/{month}.
+    // Without this method, "/claims/new" would be treated as a workflowId.
     @GetMapping("/new")
-    public String newClaim(@AuthenticationPrincipal UserDetails user,
-                            org.springframework.web.servlet.mvc.support.RedirectAttributes ra,
-                            Model model) {
-        StaffInfo staff = userService.getStaffByUsername(user.getUsername());
+    public String newClaimNoMonth() {
+        return "redirect:/dashboard";
+    }
 
-        // Check if staff already has an existing DRAFT
-        List<com.eclaims.dto.ClaimFormDto> claims = claimService.getClaimsForStaff(staff.getStaffId());
-        java.util.Optional<com.eclaims.dto.ClaimFormDto> existingDraft = claims.stream()
-            .filter(c -> "DRAFT".equals(c.getWfStatus()))
-            .findFirst();
-
-        if (existingDraft.isPresent()) {
-            com.eclaims.dto.ClaimFormDto draft = existingDraft.get();
-            ra.addFlashAttribute("draftWarning", true);
-            ra.addFlashAttribute("draftWorkflowId", draft.getWorkflowId());
-            ra.addFlashAttribute("draftFormId",     draft.getFormId());
+    // ── New claim form (month picked in popup, e.g. /claims/new/2026-08) ──
+    @GetMapping("/new/{month}")
+    public String newClaim(@PathVariable String month,
+                           @AuthenticationPrincipal UserDetails user,
+                           Model model) {
+        YearMonth ym;
+        try {
+            ym = YearMonth.parse(month);          // expects yyyy-MM
+        } catch (DateTimeParseException e) {
             return "redirect:/dashboard";
         }
 
+        StaffInfo staff = userService.getStaffByUsername(user.getUsername());
+
+        // No existing-draft check: New Claim always opens a blank form.
+        // Existing drafts are left untouched (they stay on the dashboard).
         addFormModel(model, null, staff);
+        model.addAttribute("claimMonth",      ym.toString());   // "2026-08"
+        model.addAttribute("claimMonthLabel", monthLabel(ym));  // "August 2026"
         model.addAttribute("activePage", "newClaim");
         return "claims/form";
     }
@@ -91,12 +102,25 @@ public class ClaimController {
     // ── Edit draft ──────────────────────────────────────────────
     @GetMapping("/{workflowId}/edit")
     public String editClaim(@PathVariable String workflowId,
-                             @AuthenticationPrincipal UserDetails user, Model model) {
+                            @AuthenticationPrincipal UserDetails user, Model model) {
         StaffInfo staff = userService.getStaffByUsername(user.getUsername());
         ClaimFormDto form = claimService.loadForm(workflowId);
         if (!form.getStaffId().equals(staff.getStaffId()))
             return "redirect:/dashboard";
         addFormModel(model, form, staff);
+
+        // Work out the claim month from the saved rows (earliest row date)
+        YearMonth ym = form.getRows().stream()
+                .map(ClaimRowDto::getDate)
+                .filter(Objects::nonNull)
+                .min(Comparator.naturalOrder())
+                .map(YearMonth::from)
+                .orElse(null);
+        if (ym != null) {
+            model.addAttribute("claimMonth",      ym.toString());
+            model.addAttribute("claimMonthLabel", monthLabel(ym));
+        }
+
         model.addAttribute("activePage", "claims");
         return "claims/form";
     }
@@ -104,7 +128,7 @@ public class ClaimController {
     // ── View claim ──────────────────────────────────────────────
     @GetMapping("/{workflowId}")
     public String viewClaim(@PathVariable String workflowId,
-                             @AuthenticationPrincipal UserDetails user, Model model) {
+                            @AuthenticationPrincipal UserDetails user, Model model) {
         StaffInfo staff = userService.getStaffByUsername(user.getUsername());
         ClaimFormDto form = claimService.loadForm(workflowId);
 
@@ -118,9 +142,9 @@ public class ClaimController {
         model.addAttribute("balances",   balances);
         model.addAttribute("auditLogs",  auditLogs);
         model.addAttribute("claimTypes",
-            claimTypeRepository.findAllByOrderByClaimId().stream()
-                .map(c -> Map.of("claimId", (Object)c.getClaimId(), "claimTitle", c.getClaimTitle() != null ? c.getClaimTitle() : c.getClaimId()))
-                .toList());
+                claimTypeRepository.findAllByOrderByClaimId().stream()
+                        .map(c -> Map.of("claimId", (Object)c.getClaimId(), "claimTitle", c.getClaimTitle() != null ? c.getClaimTitle() : c.getClaimId()))
+                        .toList());
         model.addAttribute("activePage", "claims");
         return "claims/view";
     }
@@ -129,18 +153,24 @@ public class ClaimController {
     @PostMapping("/save-draft")
     @ResponseBody
     public ResponseEntity<?> saveDraft(@RequestBody Map<String, Object> payload,
-                                        @AuthenticationPrincipal UserDetails user) {
+                                       @AuthenticationPrincipal UserDetails user) {
         try {
             StaffInfo staff = userService.getStaffByUsername(user.getUsername());
             List<ClaimRowDto> rows = parseRows(payload);
+
+            // Claim Month must be sent and every row date must be inside it
+            String monthError = validateClaimMonth(payload, rows);
+            if (monthError != null)
+                return ResponseEntity.badRequest().body(Map.of("success", false, "message", monthError));
+
             String existingWorkflowId = payload.get("workflowId") != null
-                ? payload.get("workflowId").toString() : null;
+                    ? payload.get("workflowId").toString() : null;
             ClaimForm form = claimService.saveDraft(staff.getStaffId(), rows, existingWorkflowId);
             return ResponseEntity.ok(Map.of(
-                "success",    true,
-                "workflowId", form.getWorkflowId(),
-                "formId",     form.getFormId(),
-                "message",    "Draft saved"
+                    "success",    true,
+                    "workflowId", form.getWorkflowId(),
+                    "formId",     form.getFormId(),
+                    "message",    "Draft saved"
             ));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
@@ -151,7 +181,7 @@ public class ClaimController {
     @PostMapping("/{workflowId}/submit")
     @ResponseBody
     public ResponseEntity<?> submitClaim(@PathVariable String workflowId,
-                                          @AuthenticationPrincipal UserDetails user) {
+                                         @AuthenticationPrincipal UserDetails user) {
         try {
             StaffInfo staff = userService.getStaffByUsername(user.getUsername());
             ClaimFormDto form = claimService.loadForm(workflowId);
@@ -162,9 +192,9 @@ public class ClaimController {
 
             claimService.submitClaim(workflowId, staff.getStaffId());
             return ResponseEntity.ok(Map.of(
-                "success",     true,
-                "message",     "Claim submitted successfully",
-                "redirectUrl", "/claims/" + workflowId
+                    "success",     true,
+                    "message",     "Claim submitted successfully",
+                    "redirectUrl", "/claims/" + workflowId
             ));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
@@ -175,7 +205,7 @@ public class ClaimController {
     @PostMapping("/row/{rowId}/attachment")
     @ResponseBody
     public ResponseEntity<?> uploadRowAttachment(@PathVariable Integer rowId,
-                                                  @RequestParam("file") MultipartFile file) {
+                                                 @RequestParam("file") MultipartFile file) {
         try {
             attachmentService.uploadRowAttachment(rowId, file);
             return ResponseEntity.ok(Map.of("success", true, "message", "Attachment uploaded"));
@@ -183,14 +213,14 @@ public class ClaimController {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
         }
     }
-    
+
     @GetMapping("/row/{rowId}/attachment/view")
     public ResponseEntity<org.springframework.core.io.Resource> viewRowAttachment(
             @PathVariable Integer rowId,
             @AuthenticationPrincipal UserDetails user) {
         try {
             com.eclaims.entity.ClaimFormRow row = claimFormRowRepository.findById(rowId)
-                .orElseThrow(() -> new IllegalArgumentException("Row not found"));
+                    .orElseThrow(() -> new IllegalArgumentException("Row not found"));
 
             ClaimFormDto form = claimService.loadForm(row.getWorkflowId());
             if (!canAccess(form.getStaffId(), user))
@@ -201,29 +231,29 @@ public class ClaimController {
                 return ResponseEntity.notFound().build();
 
             org.springframework.core.io.Resource resource =
-                new org.springframework.core.io.FileSystemResource(filePath);
+                    new org.springframework.core.io.FileSystemResource(filePath);
 
             String originalName = attachmentService.getRowAttachmentOriginalName(rowId);
             String contentType  = java.nio.file.Files.probeContentType(filePath);
             if (contentType == null) contentType = "application/octet-stream";
 
             return ResponseEntity.ok()
-                .header("Content-Disposition", "inline; filename=\"" + originalName + "\"")
-                .contentType(org.springframework.http.MediaType.parseMediaType(contentType))
-                .body(resource);
+                    .header("Content-Disposition", "inline; filename=\"" + originalName + "\"")
+                    .contentType(org.springframework.http.MediaType.parseMediaType(contentType))
+                    .body(resource);
         } catch (Exception e) {
             return ResponseEntity.badRequest().build();
         }
     }
 
-    
+
     // ── Upload form-level attachment ────────────────────────────
     @PostMapping("/{workflowId}/attachment")
     @ResponseBody
     public ResponseEntity<?> uploadFormAttachment(@PathVariable String workflowId,
-                                                   @RequestParam("file") MultipartFile file,
-                                                   @RequestParam(required = false) String formId,
-                                                   @AuthenticationPrincipal UserDetails user) {
+                                                  @RequestParam("file") MultipartFile file,
+                                                  @RequestParam(required = false) String formId,
+                                                  @AuthenticationPrincipal UserDetails user) {
         try {
             ClaimFormDto form = claimService.loadForm(workflowId);
             if (!canAccess(form.getStaffId(), user))
@@ -239,19 +269,19 @@ public class ClaimController {
     // ── Download attachment ─────────────────────────────────────
     @GetMapping("/attachment/download/{stored:.+}")
     public void downloadAttachment(@PathVariable String stored,
-                                    jakarta.servlet.http.HttpServletResponse response) throws Exception {
+                                   jakarta.servlet.http.HttpServletResponse response) throws Exception {
         java.nio.file.Path path = attachmentService.getFilePath(stored);
         response.setContentType("application/octet-stream");
         response.setHeader("Content-Disposition",
-            "attachment; filename=\"" + path.getFileName().toString() + "\"");
+                "attachment; filename=\"" + path.getFileName().toString() + "\"");
         java.nio.file.Files.copy(path, response.getOutputStream());
     }
 
     // ── Download full merged PDF ────────────────────────────────
     @GetMapping("/pdf/{workflowId}")
     public void downloadPdf(@PathVariable String workflowId,
-                             @AuthenticationPrincipal UserDetails user,
-                             jakarta.servlet.http.HttpServletResponse response) throws Exception {
+                            @AuthenticationPrincipal UserDetails user,
+                            jakarta.servlet.http.HttpServletResponse response) throws Exception {
         ClaimFormDto form = claimService.loadForm(workflowId);
 
         // Ownership check
@@ -270,8 +300,8 @@ public class ClaimController {
     // ── Download summary PDF (no attachments) ──────────────────
     @GetMapping("/pdf-summary/{workflowId}")
     public void downloadSummaryPdf(@PathVariable String workflowId,
-                                    @AuthenticationPrincipal UserDetails user,
-                                    jakarta.servlet.http.HttpServletResponse response) throws Exception {
+                                   @AuthenticationPrincipal UserDetails user,
+                                   jakarta.servlet.http.HttpServletResponse response) throws Exception {
         ClaimFormDto form = claimService.loadForm(workflowId);
         if (!canAccess(form.getStaffId(), user)) { response.sendError(403, "Access denied"); return; }
         byte[] pdf = pdfService.generateSummaryOnlyPdf(workflowId);
@@ -285,12 +315,12 @@ public class ClaimController {
     @GetMapping("/api/calc/meal")
     @ResponseBody
     public ResponseEntity<?> calcMeal(@RequestParam String claimId,
-                                       @RequestParam String timeFrom,
-                                       @RequestParam String timeTo) {
+                                      @RequestParam String timeFrom,
+                                      @RequestParam String timeTo) {
         BigDecimal hours = calcService.calcHours(timeFrom, timeTo);
         BigDecimal total = "CL01".equals(claimId)
-            ? calcService.calcMealWeekday(hours)
-            : calcService.calcMealHoliday(hours);
+                ? calcService.calcMealWeekday(hours)
+                : calcService.calcMealHoliday(hours);
         return ResponseEntity.ok(Map.of("hours", hours, "total", total));
     }
 
@@ -298,7 +328,7 @@ public class ClaimController {
     @GetMapping("/api/calc/mileage")
     @ResponseBody
     public ResponseEntity<?> calcMileage(@RequestParam String vehicleType,
-                                          @RequestParam Integer km) {
+                                         @RequestParam Integer km) {
         BigDecimal total = calcService.calcMileage(vehicleType, km);
         return ResponseEntity.ok(Map.of("total", total));
     }
@@ -307,26 +337,26 @@ public class ClaimController {
     @GetMapping("/api/calc/travel")
     @ResponseBody
     public ResponseEntity<?> calcTravel(@RequestParam String travelId,
-                                         @RequestParam String mealId) {
+                                        @RequestParam String mealId) {
         try {
             TravelLocation loc  = travelLocationRepository.findById(travelId).orElseThrow();
             TravelMeal     meal = travelMealRepository.findById(mealId).orElseThrow();
             BigDecimal total = calcService.calcTravel(loc.getClaimLimit(), meal.getPercentageAllowance());
             return ResponseEntity.ok(Map.of(
-                "claimLimit", loc.getClaimLimit(),
-                "percentage", meal.getPercentageAllowance(),
-                "total",      total
+                    "claimLimit", loc.getClaimLimit(),
+                    "percentage", meal.getPercentageAllowance(),
+                    "total",      total
             ));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
-    
+
     // ── Delete draft ────────────────────────────────────────────
     @PostMapping("/{workflowId}/delete")
     public String deleteDraft(@PathVariable String workflowId,
-                               @AuthenticationPrincipal UserDetails user,
-                               RedirectAttributes ra) {
+                              @AuthenticationPrincipal UserDetails user,
+                              RedirectAttributes ra) {
         try {
             StaffInfo staff = userService.getStaffByUsername(user.getUsername());
             ClaimFormDto form = claimService.loadForm(workflowId);
@@ -340,7 +370,7 @@ public class ClaimController {
             // Admin can delete any draft, staff can only delete their own
             String staffId = staff.getStaffId();
             boolean isPrivileged = user.getAuthorities().stream()
-                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+                    .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
             if (isPrivileged) {
                 // Admin bypass — use form's staffId so ownership check inside service passes
                 staffId = form.getStaffId();
@@ -358,22 +388,22 @@ public class ClaimController {
     @GetMapping("/api/rows/{workflowId}")
     @ResponseBody
     public ResponseEntity<?> getSavedRows(@PathVariable String workflowId,
-                                           @AuthenticationPrincipal UserDetails user) {
+                                          @AuthenticationPrincipal UserDetails user) {
         try {
             ClaimFormDto form = claimService.loadForm(workflowId);
             if (!canAccess(form.getStaffId(), user))
                 return ResponseEntity.status(403).body(Map.of("error", "Access denied"));
 
             List<Map<String, Object>> rows = claimFormRowRepository
-                .findByWorkflowIdOrderByCreatedDate(workflowId)
-                .stream()
-                .map(r -> {
-                    Map<String, Object> m = new java.util.HashMap<>();
-                    m.put("rowId",   r.getRowId());
-                    m.put("claimId", r.getClaimId());
-                    return m;
-                })
-                .toList();
+                    .findByWorkflowIdOrderByCreatedDate(workflowId)
+                    .stream()
+                    .map(r -> {
+                        Map<String, Object> m = new java.util.HashMap<>();
+                        m.put("rowId",   r.getRowId());
+                        m.put("claimId", r.getClaimId());
+                        return m;
+                    })
+                    .toList();
             return ResponseEntity.ok(rows);
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
@@ -393,13 +423,13 @@ public class ClaimController {
     private boolean canAccess(String claimStaffId, UserDetails user) {
         // Check role — non-STAFF roles can see all claims
         boolean isPrivileged = user.getAuthorities().stream()
-            .anyMatch(a -> {
-                String role = a.getAuthority();
-                return role.equals("ROLE_ADMIN")
-                    || role.equals("ROLE_FINANCE")
-                    || role.equals("ROLE_SUPERIOR")
-                    || role.equals("ROLE_MANAGER");
-            });
+                .anyMatch(a -> {
+                    String role = a.getAuthority();
+                    return role.equals("ROLE_ADMIN")
+                            || role.equals("ROLE_FINANCE")
+                            || role.equals("ROLE_SUPERIOR")
+                            || role.equals("ROLE_MANAGER");
+                });
         if (isPrivileged) return true;
 
         // STAFF role — only their own claims
@@ -414,32 +444,59 @@ public class ClaimController {
         model.addAttribute("ocrEnabled", featureConfig.isOcrEnabled());
         model.addAttribute("staff",  staff);
         model.addAttribute("claimTypes",
-            claimTypeRepository.findAllByOrderByClaimId().stream()
-                .map(c -> Map.of("claimId", (Object)c.getClaimId(), "claimTitle", c.getClaimTitle() != null ? c.getClaimTitle() : c.getClaimId()))
-                .toList());
+                claimTypeRepository.findAllByOrderByClaimId().stream()
+                        .map(c -> Map.of("claimId", (Object)c.getClaimId(), "claimTitle", c.getClaimTitle() != null ? c.getClaimTitle() : c.getClaimId()))
+                        .toList());
         model.addAttribute("panelClinics",
-            panelMedicalRepository.findByIsActiveTrueOrderByMedicalClinic().stream()
-                .map(p -> Map.of("id", (Object)p.getPanelMedicalId(), "name", p.getMedicalClinic()))
-                .toList());
+                panelMedicalRepository.findByIsActiveTrueOrderByMedicalClinic().stream()
+                        .map(p -> Map.of("id", (Object)p.getPanelMedicalId(), "name", p.getMedicalClinic()))
+                        .toList());
         model.addAttribute("travelLocations",
-            travelLocationRepository.findAllByOrderByLocation().stream()
-                .map(t -> Map.of("id", (Object)t.getTravelId(), "location", t.getLocation(),
-                                 "limit", t.getClaimLimit() != null ? t.getClaimLimit() : BigDecimal.ZERO))
-                .toList());
+                travelLocationRepository.findAllByOrderByLocation().stream()
+                        .map(t -> Map.of("id", (Object)t.getTravelId(), "location", t.getLocation(),
+                                "limit", t.getClaimLimit() != null ? t.getClaimLimit() : BigDecimal.ZERO))
+                        .toList());
         model.addAttribute("travelMeals",
-            travelMealRepository.findAllByOrderByDescription().stream()
-                .map(m -> Map.of("id", (Object)m.getMealId(), "desc", m.getDescription(),
-                                 "pct", m.getPercentageAllowance() != null ? m.getPercentageAllowance() : "0"))
-                .toList());
+                travelMealRepository.findAllByOrderByDescription().stream()
+                        .map(m -> Map.of("id", (Object)m.getMealId(), "desc", m.getDescription(),
+                                "pct", m.getPercentageAllowance() != null ? m.getPercentageAllowance() : "0"))
+                        .toList());
         model.addAttribute("projectManagers",
-            pmRepository.findAllByOrderByManagerName().stream()
-                .filter(p -> p.getStaffId() != null && !p.getStaffId().isBlank())
-                .map(p -> Map.of("id", (Object)p.getStaffId(), "name", p.getManagerName()))
-                .toList());
+                pmRepository.findAllByOrderByManagerName().stream()
+                        .filter(p -> p.getStaffId() != null && !p.getStaffId().isBlank())
+                        .map(p -> Map.of("id", (Object)p.getStaffId(), "name", p.getManagerName()))
+                        .toList());
         if (form != null && form.getStaffId() != null)
             model.addAttribute("balances", claimService.getBalances(form.getStaffId()));
         else if (staff != null)
             model.addAttribute("balances", claimService.getBalances(staff.getStaffId()));
+    }
+
+    private String monthLabel(YearMonth ym) {
+        return ym.getMonth().getDisplayName(TextStyle.FULL, Locale.ENGLISH) + " " + ym.getYear();
+    }
+
+    /**
+     * Claim Month check for save-draft.
+     * Returns an error message, or null when everything is valid.
+     */
+    private String validateClaimMonth(Map<String, Object> payload, List<ClaimRowDto> rows) {
+        Object raw = payload.get("claimMonth");
+        if (raw == null || raw.toString().isBlank())
+            return "Claim Month is required";
+
+        YearMonth month;
+        try {
+            month = YearMonth.parse(raw.toString().trim());   // yyyy-MM
+        } catch (DateTimeParseException e) {
+            return "Invalid Claim Month";
+        }
+
+        for (ClaimRowDto r : rows) {
+            if (r.getDate() == null || !YearMonth.from(r.getDate()).equals(month))
+                return "All claim rows must have a date within " + monthLabel(month);
+        }
+        return null;
     }
 
     @SuppressWarnings("unchecked")
